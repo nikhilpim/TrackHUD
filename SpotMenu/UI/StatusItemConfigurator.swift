@@ -1,53 +1,48 @@
-import SwiftUI
+import AppKit
 
 final class StatusItemConfigurator {
     static func configure(
         statusItem: NSStatusItem,
-        statusItemModel: StatusItemModel,
-        menuBarPreferencesModel: MenuBarPreferencesModel,
-        musicPlayerPreferencesModel: MusicPlayerPreferencesModel,
-        playBackModel: PlaybackModel,
         toggleAction: Selector,
         target: AnyObject
     ) {
-        let view = StatusItemView(
-            model: statusItemModel,
-            menuBarPreferencesModel: menuBarPreferencesModel,
-            musicPlayerPreferencesModel: musicPlayerPreferencesModel,
-            playbackModel: playBackModel
-        )
-        let hostingView = NSHostingView(rootView: view)
-        hostingView.translatesAutoresizingMaskIntoConstraints = false
-        hostingView.layout()
-
-        if let button = statusItem.button {
-            button.image = NSImage()
-            button.addSubview(hostingView)
-            NSLayoutConstraint.activate([
-                hostingView.centerXAnchor.constraint(
-                    equalTo: button.centerXAnchor
-                ),
-                hostingView.centerYAnchor.constraint(
-                    equalTo: button.centerYAnchor
-                ),
-            ])
-            button.action = toggleAction
-            button.target = target
-        }
+        statusItem.length = NSStatusItem.squareLength
+        guard let button = statusItem.button else { return }
+        button.title = ""
+        button.image = SpotMenuLogo.image
+        button.imagePosition = .imageOnly
+        button.imageScaling = .scaleNone
+        button.toolTip = "SpotMenu — click to show or hide player; right-click for options"
+        button.setAccessibilityLabel("SpotMenu")
+        button.setAccessibilityHelp("Show or hide the music player. Right-click for options.")
+        button.action = toggleAction
+        button.target = target
     }
+}
 
-    static func updateWidth(statusItem: NSStatusItem, maxWidth: CGFloat) {
-        guard
-            let hostingView = statusItem.button?.subviews.compactMap({
-                $0 as? NSHostingView<StatusItemView>
-            }).first
-        else {
-            return
+/// A vector template image stays sharp on Retina displays and lets macOS handle
+/// light/dark menu bars, accessibility contrast, and the pressed highlight.
+enum SpotMenuLogo {
+    static let image: NSImage = {
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
+            NSColor.black.setStroke()
+            let frame = NSBezierPath(roundedRect: NSRect(x: 1, y: 2, width: 16, height: 14),
+                                     xRadius: 4.5, yRadius: 4.5)
+            frame.lineWidth = 1.5
+            frame.stroke()
+
+            let waveform = NSBezierPath()
+            waveform.lineWidth = 1.8
+            waveform.lineCapStyle = .round
+            for (x, height): (CGFloat, CGFloat) in [(5.5, 3), (9, 7), (12.5, 4.5)] {
+                waveform.move(to: NSPoint(x: x, y: 9 - height / 2))
+                waveform.line(to: NSPoint(x: x, y: 9 + height / 2))
+            }
+            waveform.stroke()
+            return true
         }
-        hostingView.layout()
-        statusItem.length = min(
-            hostingView.intrinsicContentSize.width,
-            maxWidth
-        )
-    }
+        image.isTemplate = true
+        image.accessibilityDescription = "SpotMenu"
+        return image
+    }()
 }

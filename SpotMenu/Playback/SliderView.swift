@@ -6,12 +6,15 @@ struct CustomSlider: View {
     let foregroundColor: Color
     let trackColor: Color
 
+    @State private var dragValue: Double?
+    private var displayedValue: Double { dragValue ?? value }
+
     private let height: CGFloat = 4
     private let thumbSize: CGFloat = 20
 
     var body: some View {
         GeometryReader { geometry in
-            let availableWidth = geometry.size.width - thumbSize
+            let availableWidth = max(1, geometry.size.width - thumbSize)
 
             ZStack(alignment: .leading) {
                 RoundedRectangle(cornerRadius: height / 2)
@@ -35,7 +38,7 @@ struct CustomSlider: View {
                     )
                     .frame(maxHeight: .infinity, alignment: .center)
                     .shadow(color: .black.opacity(0.2), radius: 2, x: 0, y: 1)
-                    .animation(.easeInOut(duration: 0.15), value: value)
+                    .animation(dragValue == nil ? .easeInOut(duration: 0.15) : nil, value: displayedValue)
             }
             .frame(height: thumbSize)
             .contentShape(Rectangle())
@@ -52,9 +55,13 @@ struct CustomSlider: View {
                             range.lowerBound
                             + (range.upperBound - range.lowerBound)
                             * Double(relative)
-                        withAnimation(.easeInOut(duration: 0.15)) {
-                            value = newValue
-                        }
+                        // Preview locally; don't send AppleScript or animate
+                        // the entire observable model on every mouse movement.
+                        dragValue = newValue
+                    }
+                    .onEnded { _ in
+                        if let dragValue { value = dragValue }
+                        dragValue = nil
                     }
             )
         }
@@ -62,10 +69,10 @@ struct CustomSlider: View {
     }
 
     private func progressWidth(in availableWidth: CGFloat) -> CGFloat {
-        let clampedValue = max(range.lowerBound, min(range.upperBound, value))
+        let clampedValue = max(range.lowerBound, min(range.upperBound, displayedValue))
         let percent =
             (clampedValue - range.lowerBound)
-            / (range.upperBound - range.lowerBound)
+            / max(1, range.upperBound - range.lowerBound)
         return CGFloat(percent) * availableWidth + thumbSize / 2
     }
 

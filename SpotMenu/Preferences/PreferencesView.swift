@@ -115,11 +115,7 @@ struct PreferencesView: View {
                 playbackModel: playbackModel
             )
         case .menuBar:
-            MenuBarPreferencesView(
-                model: menuBarPreferencesModel,
-                playbackModel: playbackModel,
-                musicPlayerPreferencesModel: musicPlayerPreferencesModel
-            )
+            MenuBarPreferencesView()
         case .shortcuts:
             ShortcutPreferencesView(model: playbackModel, musicPlayerPreferencesModel: musicPlayerPreferencesModel)
         case .about:
