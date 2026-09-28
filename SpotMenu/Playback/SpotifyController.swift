@@ -15,7 +15,7 @@ class SpotifyController: MusicPlayerController {
         self.preferences = preferences
     }
 
-    func fetchNowPlayingInfo() -> PlaybackInfo? {
+    @MainActor func fetchNowPlayingInfo() async -> PlaybackInfo? {
         let script = """
                 tell application "Spotify"
                     if it is running then
@@ -34,7 +34,7 @@ class SpotifyController: MusicPlayerController {
                 end tell
             """
 
-        guard let output = runAppleScript(script), output != "NOT_RUNNING"
+        guard let output = await runAppleScriptAsync(script), output != "NOT_RUNNING"
         else {
             return nil
         }
@@ -95,18 +95,20 @@ class SpotifyController: MusicPlayerController {
             }
         }
 
-        if let trackID = trackID, trackID != lastTrackID, isTrack {
-            let semaphore = DispatchSemaphore(value: 0)
-
-            SpotifyAuthManager.shared.checkIfTrackIsLiked(trackID: trackID) {
-                isLiked in
-                self.lastIsLiked = isLiked
-                isLikedResult = isLiked
-                semaphore.signal()
-            }
-
-            _ = semaphore.wait(timeout: .now() + 2)
+        if trackID != lastTrackID {
             lastTrackID = trackID
+            lastIsLiked = nil
+            isLikedResult = nil
+            if let trackID, isTrack {
+                // Publish cached results on the next poll; never wait for HTTP
+                // while updating playback progress.
+                SpotifyAuthManager.shared.checkIfTrackIsLiked(trackID: trackID) { [weak self] isLiked in
+                    DispatchQueue.main.async {
+                        guard let self, self.lastTrackID == trackID else { return }
+                        self.lastIsLiked = isLiked
+                    }
+                }
+            }
         }
 
         return PlaybackInfo(
@@ -118,13 +120,13 @@ class SpotifyController: MusicPlayerController {
             currentTime: min(currentTime, totalTime),
             image: nil,
             isLiked: isLikedResult,
-            longFormInfo: longFormInfo
+            longFormInfo: longFormInfo,
+            trackID: trackURI
         )
     }
 
     func togglePlayPause() {
-        let state = fetchNowPlayingInfo()?.isPlaying == true ? "pause" : "play"
-        _ = runAppleScript("tell application \"Spotify\" to \(state)")
+        _ = runAppleScript("tell application \"Spotify\" to playpause")
     }
 
     func skipForward() {
@@ -135,8 +137,8 @@ class SpotifyController: MusicPlayerController {
         _ = runAppleScript("tell application \"Spotify\" to previous track")
     }
 
-    func updatePlaybackPosition(to seconds: Double) {
-        _ = runAppleScript(
+    func updatePlaybackPosition(to seconds: Double) async {
+        _ = await runAppleScriptAsync(
             "tell application \"Spotify\" to set player position to \(Int(seconds))"
         )
     }

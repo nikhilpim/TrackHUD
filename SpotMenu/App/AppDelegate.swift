@@ -4,17 +4,15 @@ import SwiftUI
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
-    var statusItemModel = StatusItemModel()
     var playbackAppearancePreferencesModel =
         PlaybackAppearancePreferencesModel()
     var musicPlayerPreferencesModel = MusicPlayerPreferencesModel()
     var playbackModel: PlaybackModel!
     var menuBarPreferencesModel = MenuBarPreferencesModel()
     var popoverManager: PopoverManager!
+    let playerPresentation = PlayerPresentation()
     var preferencesWindow: NSWindow?
-    var eventMonitor: Any?
-    var menuBarPreferencesModelCancellable: AnyCancellable?
-    var isUsingCustomStatusView = false
+    private var layoutCancellable: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -29,8 +27,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Handle right-click menu
         NSEvent.addLocalMonitorForEvents(matching: [.rightMouseUp]) {
             [weak self] event in
-            self?.handleRightClick(event: event)
-            return nil
+            if self?.handleRightClick(event: event) == true { return nil }
+            return event
         }
 
         // Observe playback updates
@@ -43,18 +41,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Set up popover manager
-        let playbackView = PlaybackView(
+        let playbackView = FloatingPlayerRoot(
             model: playbackModel,
             preferences: playbackAppearancePreferencesModel,
-            musicPlayerPreferencesModel: musicPlayerPreferencesModel
+            musicPreferences: musicPlayerPreferencesModel,
+            presentation: playerPresentation
         )
-        popoverManager = PopoverManager(contentView: playbackView)
-
-        // Global event monitor to dismiss popover
-        eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [
-            .leftMouseDown, .rightMouseDown,
-        ]) { [weak self] _ in
-            self?.popoverManager.dismiss()
+        popoverManager = PopoverManager(contentView: playbackView, presentation: playerPresentation)
+        popoverManager.configure(layout: playbackAppearancePreferencesModel.layout, focus: playbackAppearancePreferencesModel.focusMode,
+                                 anchor: playbackAppearancePreferencesModel.focusAnchor)
+        layoutCancellable = Publishers.CombineLatest3(
+            playbackAppearancePreferencesModel.$layout.removeDuplicates(),
+            playbackAppearancePreferencesModel.$focusMode.removeDuplicates(),
+            playbackAppearancePreferencesModel.$focusAnchor.removeDuplicates()
+        )
+        .dropFirst()
+        .receive(on: RunLoop.main)
+        .sink { [weak self] layout, focus, anchor in
+            self?.popoverManager.configure(layout: layout, focus: focus, anchor: anchor)
         }
 
         // Update UI periodically
@@ -65,33 +69,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         StatusItemConfigurator.configure(
             statusItem: statusItem,
-            statusItemModel: statusItemModel,
-            menuBarPreferencesModel: menuBarPreferencesModel,
-            musicPlayerPreferencesModel: musicPlayerPreferencesModel,
-            playBackModel: playbackModel,
             toggleAction: #selector(togglePopover),
             target: self
         )
 
         setupKeyboardShortcuts()
         updateStatusItem()
+        popoverManager.restoreVisibility(relativeTo: statusItem.button)
 
-        menuBarPreferencesModelCancellable = menuBarPreferencesModel
-            .objectWillChange.sink { [weak self] _ in
-                self?.updateStatusItem()
-            }
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
         guard let url = urls.first else { return }
         SpotifyAuthManager.shared.handleRedirect(url: url)
         NSApp.activate(ignoringOtherApps: true)
-    }
-
-    func applicationWillTerminate(_ notification: Notification) {
-        if let monitor = eventMonitor {
-            NSEvent.removeMonitor(monitor)
-        }
     }
 
     private func setupKeyboardShortcuts() {
@@ -140,45 +131,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func updateStatusItem() {
-        // Update status item model first
-        statusItemModel.artist = playbackModel.artist
-        statusItemModel.title = playbackModel.title
-        statusItemModel.isPlaying = playbackModel.isPlaying
-        statusItemModel.isLiked = playbackModel.isLiked
-        statusItemModel.playerIconName = playbackModel.playerIconName
-
-        // Update width immediately and synchronously after model changes
-        StatusItemConfigurator.updateWidth(
-            statusItem: statusItem,
-            maxWidth: menuBarPreferencesModel.maxStatusItemWidth
-        )
-        
-        // Force immediate layout update to prevent truncation flash
-        statusItem.button?.needsLayout = true
-        statusItem.button?.layoutSubtreeIfNeeded()
-        
-        // Ensure the hosting view updates its layout immediately
-        if let hostingView = statusItem.button?.subviews.compactMap({ $0 as? NSHostingView<StatusItemView> }).first {
-            hostingView.needsLayout = true
-            hostingView.layoutSubtreeIfNeeded()
-        }
+        playbackAppearancePreferencesModel.observeTrack(playbackModel.trackIdentity)
+        // The menu-bar logo is deliberately static; metadata stays in the player.
     }
 
     @objc func togglePopover() {
         popoverManager.toggle(relativeTo: statusItem.button)
     }
 
-    private func handleRightClick(event: NSEvent) {
+    private func handleRightClick(event: NSEvent) -> Bool {
         guard let button = statusItem.button,
-            button.frame.contains(
+            event.window === button.window,
+            button.bounds.contains(
                 button.convert(event.locationInWindow, from: nil)
             )
-        else { return }
+        else { return false }
 
-        popoverManager.dismiss()
         statusItem.menu = MenuBuilder.build(delegate: self)
         button.performClick(nil)
         statusItem.menu = nil
+        return true
     }
 
     @objc func refreshAction() {

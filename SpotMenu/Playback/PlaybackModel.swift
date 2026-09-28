@@ -44,12 +44,12 @@ enum PreferredPlayer: String, CaseIterable, Identifiable {
     }
 }
 
-enum LongFormKind {
+enum LongFormKind: Equatable {
     case audiobook
     case podcastEpisode
 }
 
-struct LongFormInfo {
+struct LongFormInfo: Equatable {
     let kind: LongFormKind
     let title: String      // book or show title
     let authors: [String]  // authors or publisher
@@ -66,28 +66,46 @@ struct PlaybackInfo {
     let image: Image?
     let isLiked: Bool?
     let longFormInfo: LongFormInfo?
+    var trackID: String? = nil
+    var artworkImage: NSImage? = nil
 }
 
 protocol MusicPlayerController {
-    func fetchNowPlayingInfo() -> PlaybackInfo?
+    @MainActor func fetchNowPlayingInfo() async -> PlaybackInfo?
     func togglePlayPause()
     func skipForward()
     func skipBack()
-    func updatePlaybackPosition(to seconds: Double)
+    func updatePlaybackPosition(to seconds: Double) async
     func openApp()
     func toggleLiked()
     func likeTrack()
     func unlikeTrack()
 }
 
+/// Only the seek controls observe this object. Its ticks must not invalidate
+/// the player root, material timelines, or decorative visualizer.
+final class PlaybackProgress: ObservableObject {
+    @Published var totalTime: Double = 1
+    @Published var currentTime: Double = 0
+}
+
 class PlaybackModel: ObservableObject {
+    let artwork = ArtworkStore()
+    @Published private(set) var trackIdentity: PlaybackTrackIdentity?
     @Published var imageURL: URL?
     @Published var image: Image? = nil
     @Published var isPlaying: Bool = false
     @Published var title: String = ""
     @Published var artist: String = ""
-    @Published var totalTime: Double = 1
-    @Published var currentTime: Double = 0
+    let progress = PlaybackProgress()
+    var totalTime: Double {
+        get { progress.totalTime }
+        set { if progress.totalTime != newValue { progress.totalTime = newValue } }
+    }
+    var currentTime: Double {
+        get { progress.currentTime }
+        set { if progress.currentTime != newValue { progress.currentTime = newValue } }
+    }
     @Published var playerType: PlayerType
     @Published var isLiked: Bool? = nil
     @Published var longFormInfo: LongFormInfo? = nil
@@ -95,6 +113,8 @@ class PlaybackModel: ObservableObject {
     private let preferences: MusicPlayerPreferencesModel
     private var controller: MusicPlayerController
     private var timer: Timer?
+    private var fetchTask: Task<Void, Never>?
+    private var playerGeneration = 0
 
     private var cancellable: AnyCancellable?
 
@@ -106,7 +126,7 @@ class PlaybackModel: ObservableObject {
         return playerType == .spotify
     }
 
-    init(preferences: MusicPlayerPreferencesModel) {
+    init(preferences: MusicPlayerPreferencesModel, startsPolling: Bool = true) {
         self.preferences = preferences
 
         let (controller, type) = Self.selectController(
@@ -116,9 +136,10 @@ class PlaybackModel: ObservableObject {
         self.controller = controller
         self.playerType = type
 
+        guard startsPolling else { return }
         fetchInfo()
-        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in
-            self.fetchInfo()
+        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            self?.fetchInfo()
         }
 
         cancellable = preferences.$preferredMusicApp
@@ -128,11 +149,19 @@ class PlaybackModel: ObservableObject {
             }
     }
 
+    deinit {
+        timer?.invalidate()
+        fetchTask?.cancel()
+    }
+
     func switchPlayer(to newPreference: PreferredPlayer) {
         let (newController, newType) = Self.selectController(
             for: newPreference,
             preferences: preferences
         )
+        playerGeneration += 1
+        fetchTask?.cancel()
+        fetchTask = nil
         controller = newController
         playerType = newType
         fetchInfo()
@@ -182,29 +211,46 @@ class PlaybackModel: ObservableObject {
     }
 
     func fetchInfo() {
-        guard let info = controller.fetchNowPlayingInfo() else {
-            reset()
-            return
+        // Coalesce timer ticks while the player is slow or awaiting permission.
+        guard fetchTask == nil else { return }
+        let controller = controller
+        let generation = playerGeneration
+        fetchTask = Task { @MainActor [weak self] in
+            let info = await controller.fetchNowPlayingInfo()
+            guard let self, !Task.isCancelled,
+                  generation == self.playerGeneration else { return }
+            defer { self.fetchTask = nil }
+            guard let info else {
+                self.reset()
+                return
+            }
+            self.apply(info)
         }
+    }
 
+    @MainActor func apply(_ info: PlaybackInfo) {
         let displayText = computeDisplayText(from: info)
-
-        DispatchQueue.main.async {
-            self.title = displayText.title
-            self.artist = displayText.artist
-            self.isPlaying = info.isPlaying
-            self.imageURL = info.imageURL
-            self.totalTime = info.totalTime
-            self.currentTime = info.currentTime
-            self.image = info.image
-            self.isLiked = info.isLiked
-            self.longFormInfo = info.longFormInfo
-
-            NotificationCenter.default.post(
-                name: .contentModelDidUpdate,
-                object: nil
+        // Reassigning even identical @Published values invalidates subscribers.
+        // A normal polling tick should publish only to the progress controls.
+        if title != displayText.title { title = displayText.title }
+        if artist != displayText.artist { artist = displayText.artist }
+        if isPlaying != info.isPlaying { isPlaying = info.isPlaying }
+        if imageURL != info.imageURL { imageURL = info.imageURL }
+        totalTime = info.totalTime
+        currentTime = info.currentTime
+        if image != info.image { image = info.image }
+        if isLiked != info.isLiked { isLiked = info.isLiked }
+        if longFormInfo != info.longFormInfo { longFormInfo = info.longFormInfo }
+        if !info.title.isEmpty {
+            let identity = PlaybackTrackIdentity(
+                player: playerType == .spotify ? "spotify" : "appleMusic",
+                trackID: info.trackID, artist: info.artist, title: info.title
             )
+            if trackIdentity != identity { trackIdentity = identity }
         }
+        artwork.update(url: info.imageURL, fallback: info.artworkImage, identity: trackIdentity)
+
+        NotificationCenter.default.post(name: .contentModelDidUpdate, object: nil)
     }
 
     func togglePlayPause() {
@@ -266,8 +312,9 @@ class PlaybackModel: ObservableObject {
     }
 
     func updatePlaybackPosition(to seconds: Double) {
-        controller.updatePlaybackPosition(to: seconds)
         self.currentTime = seconds
+        let controller = controller
+        Task { await controller.updatePlaybackPosition(to: seconds) }
     }
 
     func openMusicApp() {
@@ -287,17 +334,18 @@ class PlaybackModel: ObservableObject {
         )
     }
 
-    private func reset() {
-        DispatchQueue.main.async {
-            self.title = ""
-            self.artist = ""
-            self.isPlaying = false
-            self.imageURL = nil
-            self.currentTime = 0
-            self.totalTime = 1
-            self.image = nil
-            self.longFormInfo = nil
-        }
+    @MainActor private func reset() {
+        trackIdentity = nil
+        artwork.update(url: nil, fallback: nil, identity: nil)
+        title = ""
+        artist = ""
+        isPlaying = false
+        imageURL = nil
+        currentTime = 0
+        totalTime = 1
+        image = nil
+        isLiked = nil
+        longFormInfo = nil
     }
 
     private func computeDisplayText(from info: PlaybackInfo)
@@ -338,13 +386,35 @@ class PlaybackModel: ObservableObject {
     }
 }
 
+// Keep script execution serialized, but never make periodic polling wait on
+// the main thread. Only plain strings/data cross back to the UI.
+private let appleScriptQueue = DispatchQueue(label: "SpotMenu.AppleScript", qos: .userInitiated)
+
 func runAppleScript(_ script: String) -> String? {
-    var error: NSDictionary?
-    if let scriptObject = NSAppleScript(source: script) {
-        let output = scriptObject.executeAndReturnError(&error)
-        return output.stringValue
+    appleScriptQueue.sync {
+        var error: NSDictionary?
+        return NSAppleScript(source: script)?.executeAndReturnError(&error).stringValue
     }
-    return nil
+}
+
+func runAppleScriptAsync(_ script: String) async -> String? {
+    await withCheckedContinuation { continuation in
+        appleScriptQueue.async {
+            var error: NSDictionary?
+            let result = NSAppleScript(source: script)?.executeAndReturnError(&error)
+            continuation.resume(returning: error == nil ? result?.stringValue : nil)
+        }
+    }
+}
+
+func runAppleScriptDataAsync(_ script: String) async -> Data? {
+    await withCheckedContinuation { continuation in
+        appleScriptQueue.async {
+            var error: NSDictionary?
+            let result = NSAppleScript(source: script)?.executeAndReturnError(&error)
+            continuation.resume(returning: error == nil ? result?.data : nil)
+        }
+    }
 }
 
 func openApp(bundleIdentifier: String) {

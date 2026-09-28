@@ -7,29 +7,33 @@ class AppleMusicController: MusicPlayerController {
     private var lastTitle: String?
     private var lastImage: NSImage?
 
-    func fetchNowPlayingInfo() -> PlaybackInfo? {
+    @MainActor func fetchNowPlayingInfo() async -> PlaybackInfo? {
         let script = """
                 tell application \"Music\"
                     if it is running then
                         set trackName to name of current track
+                        set trackIdentifier to ""
+                        try
+                            set trackIdentifier to persistent ID of current track
+                        end try
                         set artistName to artist of current track
                         set durationSec to duration of current track
                         set currentSec to player position
                         set isPlayingState to (player state is playing)
-                        return trackName & \"|||SEP|||\" & artistName & \"|||SEP|||\" & durationSec & \"|||SEP|||\" & currentSec & \"|||SEP|||\" & isPlayingState
+                        return trackName & \"|||SEP|||\" & artistName & \"|||SEP|||\" & durationSec & \"|||SEP|||\" & currentSec & \"|||SEP|||\" & isPlayingState & "|||SEP|||" & trackIdentifier
                     else
                         return \"NOT_RUNNING\"
                     end if
                 end tell
             """
 
-        guard let output = runAppleScript(script), output != "NOT_RUNNING"
+        guard let output = await runAppleScriptAsync(script), output != "NOT_RUNNING"
         else {
             return nil
         }
 
         let parts = output.components(separatedBy: "|||SEP|||")
-        if parts.count == 5 {
+        if parts.count == 6 {
             let artist = parts[1]
             let title = parts[0]
             let totalTime =
@@ -41,7 +45,7 @@ class AppleMusicController: MusicPlayerController {
                 == "true"
 
             if artist != lastArtist || title != lastTitle {
-                lastImage = getCurrentTrackArtwork()
+                lastImage = await getCurrentTrackArtwork()
                 lastArtist = artist
                 lastTitle = title
             }
@@ -55,14 +59,16 @@ class AppleMusicController: MusicPlayerController {
                 currentTime: currentTime,
                 image: lastImage != nil ? Image(nsImage: lastImage!) : nil,
                 isLiked: nil,
-                longFormInfo: nil
+                longFormInfo: nil,
+                trackID: parts[5].trimmingCharacters(in: .whitespacesAndNewlines),
+                artworkImage: lastImage
             )
         }
 
         return nil
     }
 
-    func getCurrentTrackArtwork() -> NSImage? {
+    @MainActor func getCurrentTrackArtwork() async -> NSImage? {
         let script = """
             tell application \"Music\"
                     if it is running then
@@ -71,23 +77,12 @@ class AppleMusicController: MusicPlayerController {
             end tell
             """
 
-        var error: NSDictionary?
-        if let scriptObject = NSAppleScript(source: script) {
-            let output = scriptObject.executeAndReturnError(&error)
-            let data = output.data
-            return NSImage(data: data)
-        }
-
-        if let error = error {
-            print("AppleScript Error: \(error)")
-        }
-
-        return nil
+        guard let data = await runAppleScriptDataAsync(script) else { return nil }
+        return NSImage(data: data)
     }
 
     func togglePlayPause() {
-        let state = fetchNowPlayingInfo()?.isPlaying == true ? "pause" : "play"
-        _ = runAppleScript("tell application \"Music\" to \(state)")
+        _ = runAppleScript("tell application \"Music\" to playpause")
     }
 
     func skipForward() {
@@ -98,8 +93,8 @@ class AppleMusicController: MusicPlayerController {
         _ = runAppleScript("tell application \"Music\" to previous track")
     }
 
-    func updatePlaybackPosition(to seconds: Double) {
-        _ = runAppleScript(
+    func updatePlaybackPosition(to seconds: Double) async {
+        _ = await runAppleScriptAsync(
             "tell application \"Music\" to set player position to \(Int(seconds))"
         )
     }
